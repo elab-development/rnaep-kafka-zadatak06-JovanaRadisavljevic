@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from typing import List
 from models import Product
 import asyncio, json
+from datetime import datetime, timezone
 
 producer = AIOKafkaProducer(bootstrap_servers='kafka:9092')
 
@@ -37,13 +38,38 @@ async def consume(consumer: AIOKafkaConsumer):
         async for msg in consumer:
             order = json.loads(msg.value.decode('utf-8'))
             product = products_db.get(order['product_id'])
-            
-            if product and product.quantity >= order['quantity']:
-                product.quantity -= order['quantity']
-                await producer.send_and_wait("order-confirmed", json.dumps({
+
+            if not product:
+                error_payload = {
                     "order_id": order['id'],
-                    "product_id": product.id
-                }).encode('utf-8'))
+                    "product_id": order['product_id'],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "error_reason": "Proizvod ne postoji u katalogu"
+                }
+                await producer.send_and_wait(
+                    "product_not_found_events",
+                    json.dumps(error_payload).encode('utf-8')
+                )
+                continue
+            
+            if product.quantity < order['quantity']:
+                error_payload = {
+                    "order_id": order['id'],
+                    "product_id": order['product_id'],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "error_reason": "Nedovoljna kolicina na stanju"
+                }
+                await producer.send_and_wait(
+                    "out_of_stock_events",
+                    json.dumps(error_payload).encode('utf-8')
+                )
+                continue
+
+            product.quantity -= order['quantity']
+            await producer.send_and_wait("order-confirmed", json.dumps({
+                "order_id": order['id'],
+                "product_id": product.id
+            }).encode('utf-8'))
     except asyncio.CancelledError:
         pass
 
